@@ -321,6 +321,47 @@ arm-lab 은 둘 다 넣었습니다.
 - **학습 그래프** — lerobot 로그 줄의 `loss`·`grdn`·`lr`·`smp/s` 를 읽어 loss, grad norm·학습률 그래프와 진행률·남은 시간
   (남은 step ÷ (samples/s ÷ batch))을 보여 줍니다.
 
+## 학습 정책별 처리 (`TRAIN_POLICIES` · `policy_train_args`)
+
+lerobot e40b58a 의 정책 19종을 조사해 원격조작 데이터 → 모방학습 흐름에 맞는 5종만 화면에 둡니다
+(ACT · Diffusion · SmolVLA · X-VLA · MolmoAct2). TD-MPC(보상 필요·정사각 이미지)·gaussian_actor(온라인 RL, lerobot-train 불가)는 실측으로 제외,
+pi0 계열·GR00T 등은 VRAM·RTC 롤아웃 요구 때문에 보류했습니다.
+
+`policy_train_args(pol, ds_root, opts)` 가 데이터셋 `meta/info.json` 을 보고 인자를 만들고, lerobot 이 모델을 내려받은 **뒤에야** 내는 오류를
+시작 전에 막습니다. 로컬·HF Jobs·화면 점검(`/api/train/check`)이 같은 함수를 씁니다.
+
+- **Diffusion**: `DiffusionConfig.validate_features` 가 resize 설정과 관계없이 카메라 해상도가 모두 같아야 통과시킵니다 → 미리 거부.
+  `ddim` 선택지(기본 켬)는 `--policy.noise_scheduler_type=DDIM --policy.num_inference_steps=10`. 시험 서버(CPU 4코어)에서 동작 묶음 하나가
+  23 s(DDPM 100회) → 2.4 s 로 줄었습니다.
+- **ImageNet 백본**: ACT·Diffusion 은 학습 시작 때 torchvision ResNet18 가중치를 `download.pytorch.org` 에서 받습니다.
+  `nobb` 선택지는 `--policy.pretrained_backbone_weights=null`. 캐시(`$TORCH_HOME/hub/checkpoints/resnet18-f37072fd.pth`)가 없으면 경고.
+- **X-VLA**: `--policy.path=lerobot/xvla-base --policy.action_mode=auto --policy.max_action_dim=20 --policy.dtype=bfloat16`.
+  - Hub 의 xvla-base `config.json` 은 `max_action_dim: null` 이라 `auto` 만 주면 출력 차원이 정해지지 않습니다 → `max_action_dim=20` 필수.
+  - `--policy.path` 로 시작하면 `make_policy` 가 사전학습 모델의 `input_features`(image·image2·image3, state 8)를 그대로 둡니다
+    (factory.py `if not cfg.input_features`). 그래서 내 카메라를 `--rename_map` 으로 시점 이름에 연결합니다 (`cam_order`: 전경 → 손목).
+    빈 시점은 X-VLA 가 0 으로 채웁니다(`_prepare_images`). 관절은 `max_state_dim` 으로 채우므로 config 의 state shape(8)는 무시합니다.
+  - `so101_bimanual` 모드는 그리퍼 채널을 0 으로 지우고 sigmoid 를 씌워(0~1) SO-101 의 연속 그리퍼 값과 맞지 않아 쓰지 않습니다.
+- **MolmoAct2**: `--policy.type=molmoact2 --policy.checkpoint_path=allenai/MolmoAct2-SO100_101` + 동작 전문가만 학습(`train_action_expert_only`,
+  `action_mode=continuous`), bf16, gradient checkpointing, SO-101 프롬프트(`setup_type`·`control_mode`)와 관절 좌표 변환
+  (`joint_signs=[1,-1,1,1,1,1]`, `joint_offsets=[0,90,90,0,0,0]` — lerobot ≥0.5 캘리브레이션 기준)을 LeRobot 변환본과 같게 줍니다.
+  `image_keys` 는 내 카메라 키(전경 → 손목). SO 한팔(robot_type `so*`, 관절 6개)만 허용.
+  - **lerobot 버그**: `lerobot_train.py:324-332` 는 사전학습/체크포인트에서 processor 를 불러올 때 `normalizer_processor` override 를 넘기는데
+    MolmoAct2 파이프라인의 단계 이름은 `molmoact2_masked_normalizer` 라 `KeyError` 로 즉사합니다(설정 파일로 재현 확인). 그래서
+    LeRobot 변환본(`lerobot/MolmoAct2-SO100_101-LeRobot`)에서 `--policy.path` 로 미세조정하거나 `--resume` 할 수 없습니다 →
+    원본(`checkpoint_path`)에서 시작하고, 이어서 학습은 `policy_resume_block()` 으로 막습니다.
+  - 정책을 만들 때마다(롤아웃 포함) `checkpoint_path` 의 원본 21.8GB 를 불러온 뒤 체크포인트 가중치를 덮어씁니다.
+- **GPU 확인**: arm-lab 본체는 torch 를 import 하지 않으므로 `local_cuda()` 가 하위 프로세스로 `torch.cuda` 를 묻고 10분 캐시합니다.
+  `gpu: True` 정책은 로컬 학습 시 GPU 가 없으면 거부, `min_vram_gb` 보다 작으면 거부(HF Jobs 는 통과).
+
+### 롤아웃 카메라 연결 (`rollout_rename_map`)
+
+1. 체크포인트 `train_config.json` 에 `rename_map` 이 있고 그 카메라가 지금 Setup 에 있으면 그대로 `--rename_map` 으로 넘깁니다.
+2. 아니면 정책 카메라(`image_keys` 또는 VISUAL 입력)가 Setup 에 없을 때 `cam_order` 순으로 연결합니다 — Hub 의 MolmoAct2 SO-101(`cam0·cam1`)을
+   학습 없이 쓰는 경우. 카메라 수가 모자라면 연결하지 않고 오류(X-VLA 처럼 일부 시점만 채워도 되는 `PARTIAL_VIEW_POLICIES` 는 예외).
+
+`policy_fit` 은 이 연결로 카메라를 대조하고, 스스로 resize 하는 정책(`RESIZING_POLICIES`)은 해상도 경고를, 관절을 채우는 정책
+(`PADDED_STATE_POLICIES`)은 관절 수 검사를 건너뜁니다. GPU 정책·디노이징 많은 Diffusion 을 GPU 없는 기기에서 고르면 경고합니다.
+
 ## Hugging Face Hub · HF Jobs
 
 LeLab(huggingface/leLab) 에 있고 arm-lab 에 없던 것 중 가장 큰 것. 구현은 `armlab_hub.py`.
@@ -415,5 +456,9 @@ LeLab 에 있지만 넣지 않은 것: 온보딩 투어(셋업 마법사가 대�
   ("Not logged in")까지 진행 확인(과금 없음). 대용량 파일 다운로드는 시험 환경에서 `*.xethub.hf.co` 가 막혀 실제 전송은 확인 못 함(실패 시 정리는 확인)
 - 복구(색인 삭제 → 2 에피소드 복구 → LeRobotDataset 로드), 사전 점검(해상도 경고·양팔 거부), 실패 힌트(포트 없음), 공장 상태 가상 팔에서
   캘리브레이션 프롬프트 자동 응답, 패키지 설치(transformers 설치 후 torch 2.11 유지), FOURCC 가 lerobot 카메라 설정까지 전달
+- 정책: 실제 lerobot 으로 ACT·Diffusion(DDIM)·VQ-BeT 학습 → 가상 팔 롤아웃, xvla-base 설정 구조 그대로 크기만 줄인 X-VLA 로
+  arm-lab 인자(`--policy.path` · `auto` · `max_action_dim` · `rename_map`) 학습 → 저장된 `rename_map` 으로 가상 팔 롤아웃(28 Hz),
+  `rename_map` 없으면 lerobot 이 거부하는 것 확인. 정책 인자 전부를 lerobot-train 설정 파서(validate 포함)로 파싱.
+  **MolmoAct2 실학습과 실제 크기 X-VLA 는 못 돌렸습니다** (가중치 3.5GB·21.8GB 다운로드가 시험 환경에서 차단)
 - 롤아웃 모니터·시도 기록(브라우저: 카메라·3D·관절표·S/F/U 키·중지 후 화면), 모델 내보내기→가져오기 왕복(OV 상태 유지),
   악성 tar/zip(경로 탈출·링크) 거부, 데이터셋 왕복, 이어서 학습(20→30 step, 데이터 순서 이어짐), Diffusion 학습·롤아웃(오프라인)

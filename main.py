@@ -3451,7 +3451,36 @@ def ov_ckpt_ok(rel):
     return ck
 
 
-LANG_POLICIES = {"smolvla", "pi0", "pi0_fast", "pi05", "groot", "xvla"}
+LANG_POLICIES = {"smolvla", "pi0", "pi0_fast", "pi05", "groot", "xvla", "molmoact2", "multi_task_dit"}
+# 입력 영상을 정책이 스스로 resize 하는 종류 — 카메라 해상도가 학습 때와 달라도 됩니다
+RESIZING_POLICIES = {"smolvla", "pi0", "pi0_fast", "pi05", "groot", "xvla", "molmoact2", "multi_task_dit"}
+# 정해진 시점 슬롯 중 일부만 채워도 되는 종류 (빈 시점은 정책이 채움)
+PARTIAL_VIEW_POLICIES = {"xvla"}
+# 관절 수를 정책이 고정 길이로 채우는 종류 — config 의 state shape 가 사전학습 모델 것으로 남아 있습니다
+PADDED_STATE_POLICIES = {"xvla"}
+GPU_POLICIES = {"xvla", "molmoact2", "pi0", "pi0_fast", "pi05", "groot"}
+
+
+def rollout_rename_map(rel):
+    """롤아웃용 카메라 이름 매핑 {내 카메라 키: 정책 카메라 키} 와 설명.
+    1) 학습 때 --rename_map 을 썼으면(X-VLA 등) train_config.json 의 것을 그대로 씁니다.
+    2) 정책 카메라 이름이 Setup 에 없고 개수가 충분하면(Hub 의 MolmoAct2 SO-101 = cam0·cam1) 전경 → 손목 순으로 연결합니다."""
+    ck = OUT_ROOT / rel
+    cfg = load_json(ck / "config.json", {})
+    pre = "observation.images."
+    mine = [pre + c for c in CAM_SPECS]
+    tc = load_json(ck / "train_config.json", {})
+    rmap = {k: v for k, v in (tc.get("rename_map") or {}).items() if k.startswith(pre) and k in mine}
+    if rmap:
+        return rmap, ""
+    want = [k for k in (cfg.get("image_keys") or []) if k.startswith(pre)] or \
+        [k for k, f in (cfg.get("input_features") or {}).items() if k.startswith(pre) and (f or {}).get("type") == "VISUAL"]
+    partial = cfg.get("type") in PARTIAL_VIEW_POLICIES
+    if not want or not mine or all(k in mine for k in want) or (len(mine) < len(want) and not partial):
+        return {}, ""
+    rmap = dict(zip(cam_order(mine), want))         # zip 은 짧은 쪽에 맞춥니다 — 남는 시점은 X-VLA 가 빈 칸으로 채움
+    note = "카메라 연결: " + ", ".join(f"{a[len(pre):]} → {b[len(pre):]}" for a, b in rmap.items())
+    return rmap, note
 
 
 def policy_needs_task(rel):
@@ -3462,23 +3491,38 @@ def policy_fit(rel):
     """체크포인트가 기대하는 입력(카메라 이름·해상도, 관절 수)과 지금 Setup 을 대조 — 팔이 움직이기 전에.
     (errors, warnings). 가져온 모델처럼 학습 데이터셋 정보가 없어도 config.json 만으로 판단합니다."""
     cfg = load_json(OUT_ROOT / rel / "config.json", {})
+    ptype = cfg.get("type")
     feats = cfg.get("input_features") or {}
     errs, warns = [], []
     pre = "observation.images."
+    rmap, note = rollout_rename_map(rel)
+    inv = {v: k[len(pre):] for k, v in rmap.items()}          # 정책 카메라 키 → 내 카메라 이름
+    if note:
+        warns.append(note)
     for key, f in feats.items():
         shape = list(f.get("shape") or [])
         if key.startswith(pre):
-            cam = key[len(pre):]
+            cam = inv.get(key, key[len(pre):])
             spec = CAM_SPECS.get(cam)
             if spec is None:
+                if ptype in PARTIAL_VIEW_POLICIES and rmap:
+                    continue                    # 학습 때도 비어 있던 시점
                 errs.append(f"정책이 카메라 '{cam}' 를 씁니다 — 지금 Setup 에 없습니다 (있는 것: {', '.join(CAM_SPECS) or '없음'})")
-            elif len(shape) == 3 and [int(spec["height"]), int(spec["width"])] != shape[1:]:
+            elif ptype not in RESIZING_POLICIES and len(shape) == 3 and [int(spec["height"]), int(spec["width"])] != shape[1:]:
                 warns.append(f"카메라 '{cam}' 해상도 {spec['width']}x{spec['height']} ≠ 학습 {shape[2]}x{shape[1]}")
-        elif key == "observation.state" and shape:
+        elif key == "observation.state" and shape and ptype not in PADDED_STATE_POLICIES:
             want = len(CTL_JOINTS) * len(SIDES)
             if shape[0] != want:
                 errs.append(f"정책의 관절 수 {shape[0]}개 ≠ 지금 구성 {want}개 ({'양팔' if BIMANUAL else '한팔'}) — "
                             "한팔/양팔 또는 기종이 학습 때와 다릅니다")
+    if ptype == "molmoact2" and robot_key() != "so101":
+        errs.append("MolmoAct2 SO-101 가중치는 SO-ARM101 관절 기준입니다 — 지금 기종에서는 쓸 수 없습니다")
+    if ptype in GPU_POLICIES and not local_cuda().get("ok"):
+        warns.append(f"{ptype} 은 CUDA GPU 용입니다 — 이 기기에서 GPU 를 찾지 못해 매우 느리거나 메모리가 부족할 수 있습니다")
+    if ptype == "diffusion" and (cfg.get("num_inference_steps") or cfg.get("num_train_timesteps") or 100) > 20 \
+            and not local_cuda().get("ok"):
+        warns.append(f"Diffusion 디노이징 {cfg.get('num_inference_steps') or cfg.get('num_train_timesteps') or 100}회 — GPU 없이 CPU 로는 "
+                     "동작 묶음 하나에 수 초~수십 초 걸립니다. 학습 때 '빠른 추론 (DDIM 10회)' 를 켜세요")
     return errs, warns
 
 
@@ -3606,20 +3650,54 @@ function ovEsc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;
 
 # ----------------------------- 페이지: 학습 ----------------------------------
 # 학습 가능한 정책. lerobot e40b58a 의 정책을 그대로 씁니다 (롤아웃도 lerobot-rollout 이 정책 종류를 알아서 처리).
-# OpenVINO 변환·NPU 추론은 ACT 만 지원합니다.
+# OpenVINO 변환·NPU 추론은 ACT 만 지원합니다. 정책별로 데이터셋에 맞춰 붙는 인자는 policy_train_args() 에서 만듭니다.
+#   steps : 화면 기본 step 수   gpu : CUDA GPU 필수(이 기기 학습 시 확인)   opts : 화면에 보이는 선택지
 TRAIN_POLICIES = {
-    "act": {"label": "ACT", "args": ["--policy.type=act"], "needs": [], "extra": "",
+    "act": {"label": "ACT", "args": ["--policy.type=act"], "needs": [], "extra": "", "steps": 80000,
+            "opts": ["nobb"],
             "hint": "ACT — 기본. 데모 50개 안팎으로도 잘 배우고 가볍습니다. OpenVINO(NPU) 변환 가능."},
     "diffusion": {"label": "Diffusion", "args": ["--policy.type=diffusion"], "needs": ["diffusers"], "extra": "diffusion",
-                  "pip": ["diffusers>=0.27.2,<0.36.0"],
+                  "pip": ["diffusers>=0.27.2,<0.36.0"], "steps": 80000, "opts": ["ddim", "nobb"],
                   "hint": "Diffusion Policy — 동작이 여러 갈래인 태스크에 강하지만 추론이 느립니다(디노이징 반복). "
-                          "OpenVINO 변환은 아직 ACT 만 됩니다."},
+                          "카메라 해상도가 모두 같아야 합니다. OpenVINO 변환은 ACT 만 됩니다."},
     "smolvla": {"label": "SmolVLA (사전학습 미세조정)", "args": ["--policy.path=lerobot/smolvla_base"],
-                "needs": ["transformers", "num2words"], "extra": "smolvla",
+                "needs": ["transformers", "num2words"], "extra": "smolvla", "steps": 20000,
                 "pip": ["transformers>=5.4.0,<5.6.0", "num2words>=0.5.14,<0.6.0", "accelerate>=1.14.0,<2.0.0"],
                 "hint": "SmolVLA — 450M 비전-언어-행동 모델을 미세조정합니다. 태스크 설명(언어)을 씁니다. "
-                        "처음 한 번 HuggingFace 에서 lerobot/smolvla_base 를 내려받고(인터넷 필요), GPU 메모리를 많이 씁니다."},
+                        "처음 한 번 HuggingFace 에서 lerobot/smolvla_base 를 내려받고(인터넷 필요), GPU 메모리를 많이 씁니다. "
+                        "롤아웃 때도 SmolVLM 설정을 HuggingFace 캐시에서 읽으므로 처음 한 번은 인터넷이 필요합니다."},
+    "xvla": {"label": "X-VLA (0.9B 미세조정)", "args": ["--policy.path=lerobot/xvla-base", "--policy.action_mode=auto",
+                                                      "--policy.max_action_dim=20", "--policy.dtype=bfloat16"],
+             "needs": ["transformers"], "extra": "xvla", "steps": 20000, "gpu": True,
+             "pip": ["transformers>=5.4.0,<5.6.0"],
+             "hint": "X-VLA — Florence-2 기반 0.9B 비전-언어-행동 모델(lerobot/xvla-base, 3.5GB)을 미세조정합니다. "
+                     "태스크 설명을 씁니다. 카메라는 최대 3대이며 전경 카메라부터 순서대로 모델의 시점 1·2·3 에 연결됩니다. "
+                     "CUDA GPU 필요 (Thor 또는 HF Jobs)."},
+    "molmoact2": {"label": "MolmoAct2 (SO-ARM101 한팔)", "args": [
+                      "--policy.type=molmoact2", "--policy.checkpoint_path=allenai/MolmoAct2-SO100_101",
+                      "--policy.action_mode=continuous", "--policy.inference_action_mode=continuous",
+                      "--policy.train_action_expert_only=true", "--policy.model_dtype=bfloat16",
+                      "--policy.use_amp=true", "--policy.gradient_checkpointing=true",
+                      "--policy.setup_type=single so100/so101 robotic arm in molmoact2",
+                      "--policy.control_mode=absolute joint pose", "--policy.normalize_gripper=true",
+                      "--policy.joint_signs=[1,-1,1,1,1,1]", "--policy.joint_offsets=[0,90,90,0,0,0]",
+                      "--policy.chunk_size=30", "--policy.n_action_steps=30"],
+                  "needs": ["transformers", "peft", "scipy"], "extra": "molmoact2", "steps": 10000, "gpu": True,
+                  "min_vram_gb": 18,
+                  "pip": ["transformers>=5.4.0,<5.6.0", "peft>=0.18.0,<1.0.0", "scipy>=1.14.0,<2.0.0"],
+                  "hint": "MolmoAct2 — Ai2 의 SO-100/101 사전학습 가중치(allenai/MolmoAct2-SO100_101, 21.8GB)에서 동작 전문가만 "
+                          "미세조정합니다. SO-ARM101 한팔 · 카메라 2대(전경 → 손목 순) 권장. 태스크 설명을 씁니다. "
+                          "CUDA GPU 필요 — batch 8 에서 약 16.5 GiB (lerobot 문서, H100 기준). 롤아웃도 GPU 약 12 GiB. "
+                          "라이선스: Apache 2.0, Ai2 책임 있는 사용 지침(연구·교육용). 이어서 학습은 lerobot 버그로 막혀 있습니다."},
 }
+TRAIN_OPT_LABELS = {
+    "ddim": ("빠른 추론 (DDIM 10회)", "디노이징을 100회 대신 10회만 합니다. GPU 없는 기기에서 롤아웃하려면 켜 두세요."),
+    "nobb": ("ImageNet 백본 없이 (오프라인)", "ResNet18 사전학습 가중치를 받지 않고 처음부터 학습합니다. "
+                                         "인터넷이 없는 기기용 — 데이터가 적으면 성능이 떨어질 수 있습니다."),
+}
+# 미세조정형 정책은 모델 시점 이름이 정해져 있습니다 — 내 카메라를 이 순서로 연결합니다 (lerobot --rename_map)
+XVLA_VIEWS = ["observation.images.image", "observation.images.image2", "observation.images.image3"]
+FRONT_CAMS = ("top", "overview", "front", "scene", "side")
 
 
 def policy_missing(pol):
@@ -3628,6 +3706,88 @@ def policy_missing(pol):
     import importlib.util
     importlib.invalidate_caches()        # 설치 작업 직후에도 arm-lab 재시작 없이 보이게
     return [m for m in TRAIN_POLICIES[pol]["needs"] if importlib.util.find_spec(m) is None]
+
+
+def cam_order(keys):
+    """카메라 키 정렬: 전경(top 등) → 나머지(손목). 미세조정형 정책의 '주 시점' 이 앞에 오게."""
+    short = lambda k: k.rsplit(".", 1)[-1]
+    return sorted(keys, key=lambda k: (0 if short(k) in FRONT_CAMS or short(k).endswith(FRONT_CAMS) else 1, short(k)))
+
+
+_CUDA = {"t": 0.0, "v": None}
+
+
+def local_cuda(refresh=False):
+    """이 기기 CUDA GPU — {"ok", "name", "vram_gb"} (torch 를 별도 프로세스에서 한 번 조회해 10분 캐시).
+    arm-lab 본체는 torch 를 import 하지 않으므로 하위 프로세스로 묻습니다."""
+    if not refresh and _CUDA["v"] is not None and time.time() - _CUDA["t"] < 600:
+        return _CUDA["v"]
+    code = ("import json,torch;ok=torch.cuda.is_available();p=torch.cuda.get_device_properties(0) if ok else None;"
+            "print(json.dumps({'ok':ok,'name':p.name if p else '','vram_gb':round(p.total_memory/2**30,1) if p else 0}))")
+    try:
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+        v = json.loads(r.stdout.strip().splitlines()[-1])
+    except Exception as e:      # noqa: BLE001
+        v = {"ok": False, "name": "", "vram_gb": 0, "error": str(e)[:200]}
+    _CUDA.update(t=time.time(), v=v)
+    return v
+
+
+def resnet_cached():
+    """torchvision ResNet18 ImageNet 가중치가 이 기기 캐시에 있는지 (ACT·Diffusion 첫 학습 때 받는 파일)."""
+    home = os.environ.get("TORCH_HOME") or os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "torch")
+    return (Path(home) / "hub" / "checkpoints" / "resnet18-f37072fd.pth").is_file()
+
+
+def policy_train_args(pol, ds_root, opts=None):
+    """정책·데이터셋에 맞춘 lerobot-train 인자 → (args, error, warnings).
+    lerobot 이 학습 시작 수십 초~수 분 뒤(모델 다운로드 후)에야 내는 오류를 시작 전에 걸러 냅니다."""
+    opts = set(opts or ())
+    spec = TRAIN_POLICIES[pol]
+    args, warns = list(spec["args"]), []
+    info = load_json(Path(ds_root) / "meta" / "info.json", {})
+    feats = info.get("features") if isinstance(info.get("features"), dict) else {}
+    cams = cam_order([k for k, f in feats.items() if k.startswith("observation.images.")
+                      and isinstance(f, dict) and f.get("dtype") in ("video", "image")])
+    state = (feats.get("observation.state") or {}).get("shape") or [0]
+    shapes = {k: tuple(feats[k].get("shape") or ()) for k in cams}
+    if not cams:
+        return None, "이 데이터셋에 카메라 영상이 없습니다 — 정책 학습에는 카메라가 1대 이상 필요합니다", warns
+    if pol == "diffusion" and len(set(shapes.values())) > 1:
+        # lerobot DiffusionConfig.validate_features 가 resize 여부와 관계없이 거부합니다
+        detail = ", ".join(f"{k.rsplit('.', 1)[-1]} {s[1]}x{s[0]}" for k, s in shapes.items() if len(s) == 3)
+        return None, (f"Diffusion 은 카메라 해상도가 모두 같아야 합니다 ({detail}) — Setup 에서 해상도를 맞춰 다시 수집하거나 "
+                      "ACT 를 쓰세요"), warns
+    if "ddim" in opts and "ddim" in spec.get("opts", ()):
+        args += ["--policy.noise_scheduler_type=DDIM", "--policy.num_inference_steps=10"]
+    if "nobb" in opts and "nobb" in spec.get("opts", ()):
+        args.append("--policy.pretrained_backbone_weights=null")
+    elif "nobb" in spec.get("opts", ()) and not resnet_cached():
+        warns.append("처음 학습이라 ResNet18 ImageNet 가중치(약 45MB)를 download.pytorch.org 에서 받습니다 — "
+                     "인터넷이 없으면 'ImageNet 백본 없이' 를 켜세요")
+    if pol == "xvla":
+        if len(cams) > len(XVLA_VIEWS):
+            return None, f"X-VLA 는 카메라 {len(XVLA_VIEWS)}대까지입니다 (이 데이터셋: {len(cams)}대)", warns
+        rmap = dict(zip(cams, XVLA_VIEWS))
+        args.append("--rename_map=" + json.dumps(rmap))
+    if pol == "molmoact2":
+        rt = str(info.get("robot_type") or "")
+        if not rt.startswith("so") or int(state[0]) != 6:
+            return None, (f"MolmoAct2 는 SO-ARM101 한팔 데이터셋만 지원합니다 (이 데이터셋: {rt or '?'}, 관절 {state[0]}개) — "
+                          "사전학습 가중치가 SO-100/101 한팔 관절 순서·방향 기준입니다"), warns
+        if len(cams) != 2:
+            warns.append(f"MolmoAct2 SO-101 가중치는 카메라 2대(전경·손목)로 학습됐습니다 — 이 데이터셋은 {len(cams)}대")
+        args.append("--policy.image_keys=" + json.dumps(cams))
+    return args, "", warns
+
+
+def policy_resume_block(ptype):
+    """이어서 학습이 lerobot 에서 깨지는 정책 → 이유 (없으면 '')"""
+    if ptype == "molmoact2":
+        # lerobot e40b58a: 체크포인트에서 processor 를 다시 만들 때 'normalizer_processor' override 를 넘기는데
+        # MolmoAct2 파이프라인의 단계 이름은 'molmoact2_masked_normalizer' 라 KeyError 로 즉사합니다 (lerobot_train.py:324-332)
+        return "MolmoAct2 는 lerobot(e40b58a) 버그로 체크포인트에서 이어서 학습할 수 없습니다 — 새로 학습하세요"
+    return ""
 
 
 @app.post("/api/install/{pol}")
@@ -3681,16 +3841,18 @@ def train_page():
     <p class=eyebrow>Policy training</p><h2>Training</h2>
     {projline}{run_html}
     <form class=row onsubmit="startTrain(event)">
-      <select id=ds>{ds_opts}</select>
+      <select id=ds onchange="polCheck()">{ds_opts}</select>
       <input id=name placeholder="출력 이름 (예: act_pick_place_v2)" size=26>
       <select id=policy onchange="polHint()">{''.join(f'<option value="{k}">{esc(v["label"])}{" — 패키지 미설치" if policy_missing(k) else ""}</option>' for k, v in TRAIN_POLICIES.items())}</select>
       <input id=steps value=80000 size=7> <span class=muted>steps</span>
       <input id=batch value=8 size=3> <span class=muted>batch</span>
       <label class=muted title="CUDA 에서 메모리·시간 절약. 손실이 튀면 끄세요"><input type=checkbox id=amp> AMP</label>
-      <select id=target title="실행 위치"><option value=local>이 기기</option></select>
+      <select id=target title="실행 위치" onchange="polCheck()"><option value=local>이 기기</option></select>
       <button class=primary>학습 시작</button>
     </form>
-    <p class=muted id=polhint style="margin:-4px 0 10px"></p>
+    <p class=muted id=polhint style="margin:-4px 0 6px"></p>
+    <div class=row id=polopts style="margin:0 0 6px"></div>
+    <p id=polcheck style="margin:0 0 10px"></p>
     <div class="muted mono" id=which style="margin-bottom:8px"></div>
     <div class=chartbox><canvas id=chart height=90></canvas></div>
     <div class=chartbox><canvas id=chart2 height=60></canvas></div>
@@ -3737,6 +3899,24 @@ def train_page():
     <script>
     const POL={js({k: v["hint"] for k, v in TRAIN_POLICIES.items()})};
     const MISS={js({k: policy_missing(k) for k in TRAIN_POLICIES})};
+    const POLOPTS={js({k: v.get("opts", []) for k, v in TRAIN_POLICIES.items()})};
+    const POLSTEPS={js({k: v["steps"] for k, v in TRAIN_POLICIES.items()})};
+    const OPTLAB={js({k: list(v) for k, v in TRAIN_OPT_LABELS.items()})};
+    const OPTDEF={{ddim:true,nobb:false}};
+    function polOpts(){{ return [...document.querySelectorAll('#polopts input:checked')].map(x=>x.dataset.opt); }}
+    let checkSeq=0;
+    async function polCheck(){{
+      const q=++checkSeq, el=document.getElementById('polcheck');
+      const u='/api/train/check?dataset='+encodeURIComponent(document.getElementById('ds').value)
+        +'&policy='+document.getElementById('policy').value+'&opts='+polOpts().join(',')
+        +'&target='+encodeURIComponent(document.getElementById('target').value);
+      let d; try{{ d=await (await fetch(u)).json(); }}catch(e){{ return; }}
+      if(q!==checkSeq) return;
+      el.innerHTML='';
+      if(d.error){{ const b=document.createElement('span'); b.className='badge b-bad'; b.textContent=d.error; el.appendChild(b); }}
+      (d.warnings||[]).forEach(w=>{{ const b=document.createElement('span'); b.className='badge b-warn';
+        b.style.marginRight='6px'; b.textContent=w; el.appendChild(b); }});
+    }}
     async function installPol(){{
       const p=document.getElementById('policy').value;
       if(!confirm(p+' 에 필요한 패키지('+MISS[p].join(', ')+')를 설치합니다. 몇 분 걸릴 수 있습니다. 계속할까요?')) return;
@@ -3756,6 +3936,12 @@ def train_page():
     function polHint(){{
       const p=document.getElementById('policy').value, h=document.getElementById('polhint');
       h.textContent=POL[p]||'';
+      document.getElementById('steps').value=POLSTEPS[p]||80000;
+      const o=document.getElementById('polopts'); o.innerHTML='';
+      (POLOPTS[p]||[]).forEach(k=>{{ const l=document.createElement('label'); l.className='muted'; l.title=OPTLAB[k][1]; l.style.marginRight='16px';
+        const c=document.createElement('input'); c.type='checkbox'; c.dataset.opt=k; c.checked=!!OPTDEF[k];
+        c.addEventListener('change',polCheck); l.appendChild(c); l.appendChild(document.createTextNode(' '+OPTLAB[k][0])); o.appendChild(l); }});
+      polCheck();
       if((MISS[p]||[]).length){{ const b=document.createElement('button'); b.textContent='필요한 패키지 설치 ('+MISS[p].join(', ')+')';
         b.style.marginLeft='8px'; b.onclick=e=>{{ e.preventDefault(); installPol(); }}; h.appendChild(b); }}
     }}
@@ -3764,7 +3950,7 @@ def train_page():
       e.preventDefault();
       const b={{dataset:document.getElementById('ds').value,name:document.getElementById('name').value,
                steps:document.getElementById('steps').value,batch:document.getElementById('batch').value,
-               policy:document.getElementById('policy').value,amp:document.getElementById('amp').checked,
+               policy:document.getElementById('policy').value,amp:document.getElementById('amp').checked,opts:polOpts(),
                target:document.getElementById('target').value}};
       if(b.target!=='local' && !confirm('HF Jobs 에서 학습합니다 (유료, 시간당 요금).\\n데이터셋 "'+b.dataset+'" 이 내 계정 비공개 repo 로 먼저 올라갑니다.\\n끝나면 Hub 탭에서 모델을 받으세요. 계속할까요?')) return;
       const r=await fetch('/api/train',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(b)}});
@@ -3813,6 +3999,21 @@ def train_page():
     </script>"""
 
 
+@app.get("/api/train/check")
+def api_train_check(dataset: str = "", policy: str = "act", opts: str = "", target: str = "local"):
+    """학습 시작 전 점검 — 화면에서 데이터셋·정책·선택지를 바꿀 때마다 부릅니다."""
+    if policy not in TRAIN_POLICIES or not safe_name(dataset) or not (DATA_ROOT / dataset / "meta/info.json").is_file():
+        return {"error": "", "warnings": []}
+    _, err, warns = policy_train_args(policy, DATA_ROOT / dataset, [o for o in opts.split(",") if o])
+    if not err and target == "local" and TRAIN_POLICIES[policy].get("gpu"):
+        cu = local_cuda()
+        if not cu.get("ok"):
+            warns.append("이 기기에서 CUDA GPU 를 찾지 못했습니다 — 실행 위치를 HF Jobs 로 고르세요")
+        else:
+            warns.append(f"GPU: {cu.get('name')} · {cu.get('vram_gb')} GiB")
+    return {"error": err, "warnings": warns}
+
+
 @app.post("/api/train")
 async def api_train(req: Request):
     b = await req.json()
@@ -3825,14 +4026,14 @@ async def api_train(req: Request):
     ds = (b.get("dataset") or "").strip()
     if not safe_name(ds):
         return JSONResponse({"error": "데이터셋 이름은 영문/숫자/._- 만"}, status_code=400)
-    name = (b.get("name") or f"act_{ds}").strip()
-    if not safe_name(name):
-        return JSONResponse({"error": "출력 이름은 영문/숫자/._- 만"}, status_code=400)
-    steps = _clamp_int(b.get("steps"), 80000, 1, 100000000)
-    batch = _clamp_int(b.get("batch"), 8, 1, 4096)
     pol = b.get("policy") or "act"
     if pol not in TRAIN_POLICIES:
         return JSONResponse({"error": f"정책은 {', '.join(TRAIN_POLICIES)} 중 하나"}, status_code=400)
+    name = (b.get("name") or f"{pol}_{ds}").strip()
+    if not safe_name(name):
+        return JSONResponse({"error": "출력 이름은 영문/숫자/._- 만"}, status_code=400)
+    steps = _clamp_int(b.get("steps"), TRAIN_POLICIES[pol]["steps"], 1, 100000000)
+    batch = _clamp_int(b.get("batch"), 8, 1, 4096)
     miss = policy_missing(pol)
     if miss:
         return JSONResponse({"error": f"{TRAIN_POLICIES[pol]['label']} 에 필요한 패키지가 없습니다 ({', '.join(miss)}) — 터미널에서: "
@@ -3841,6 +4042,18 @@ async def api_train(req: Request):
     root = DATA_ROOT / ds
     if not root.exists():
         return JSONResponse({"error": "dataset not found"}, status_code=400)
+    pargs, perr, _ = policy_train_args(pol, root, b.get("opts"))
+    if perr:
+        return JSONResponse({"error": perr}, status_code=400)
+    if TRAIN_POLICIES[pol].get("gpu"):
+        cu = local_cuda()
+        if not cu.get("ok"):
+            return JSONResponse({"error": f"{TRAIN_POLICIES[pol]['label']} 은 CUDA GPU 가 필요합니다 — 이 기기에서 GPU 를 찾지 못했습니다. "
+                                          "실행 위치를 HF Jobs 로 고르거나 Thor 등 GPU 기기에서 학습하세요"}, status_code=400)
+        need = TRAIN_POLICIES[pol].get("min_vram_gb")
+        if need and cu.get("vram_gb") and cu["vram_gb"] < need:
+            return JSONResponse({"error": f"GPU 메모리 {cu['vram_gb']} GiB — {TRAIN_POLICIES[pol]['label']} 학습에는 약 {need} GiB 이상 필요합니다 "
+                                          "(lerobot 문서 기준). HF Jobs 의 큰 GPU 를 쓰세요"}, status_code=400)
     # lerobot 는 output_dir 가 이미 있으면 FileExistsError 로 즉사합니다.
     # 같은 데이터셋으로 두 번째 학습을 돌리는 건 흔한 일이라 이름을 자동으로 비켜 줍니다.
     out = OUT_ROOT / name
@@ -3855,7 +4068,7 @@ async def api_train(req: Request):
                                 status_code=400)
     argv = [sys.executable, "-m", "lerobot.scripts.lerobot_train",
             f"--dataset.repo_id=local/{ds}", f"--dataset.root={root}",
-            *TRAIN_POLICIES[pol]["args"], f"--output_dir={out}",
+            *pargs, f"--output_dir={out}",
             f"--steps={steps}", f"--batch_size={batch}", "--num_workers=4",
             "--save_freq=10000", "--policy.push_to_hub=false"]
     if b.get("amp"):
@@ -3879,6 +4092,9 @@ def _cloud_train(b, flavor):
     pol = b.get("policy") or "act"
     if pol not in TRAIN_POLICIES:
         return JSONResponse({"error": f"정책은 {', '.join(TRAIN_POLICIES)} 중 하나"}, status_code=400)
+    pargs, perr, _ = policy_train_args(pol, DATA_ROOT / ds, b.get("opts"))
+    if perr:
+        return JSONResponse({"error": perr}, status_code=400)
     st = _hub().status(refresh=True)
     if not st.get("ok"):
         return JSONResponse({"error": "HF Jobs 는 Hugging Face 로그인이 필요합니다 — Hub 탭에서 토큰을 넣으세요"},
@@ -3892,11 +4108,11 @@ def _cloud_train(b, flavor):
     busy = dataset_busy(ds)
     if busy:
         return JSONResponse({"error": f"{busy['id']} 가 이 데이터셋을 쓰는 중"}, status_code=400)
-    steps = _clamp_int(b.get("steps"), 80000, 1, 100000000)
+    steps = _clamp_int(b.get("steps"), TRAIN_POLICIES[pol]["steps"], 1, 100000000)
     batch = _clamp_int(b.get("batch"), 8, 1, 4096)
     name = (b.get("name") or "").strip()
     argv = [sys.executable, str(HUB_PY), "cloud-train", f"--root={DATA_ROOT / ds}", f"--name={ds}",
-            f"--flavor={flavor}", "--", *TRAIN_POLICIES[pol]["args"], f"--steps={steps}", f"--batch_size={batch}",
+            f"--flavor={flavor}", "--", *pargs, f"--steps={steps}", f"--batch_size={batch}",
             "--num_workers=4", "--save_freq=10000"]
     if safe_name(name):
         argv.append(f"--job_name={name}")          # Hub 모델 repo 이름의 앞부분
@@ -4321,6 +4537,9 @@ async def api_train_resume(req: Request):
     if not tc.is_file() or not (last / "training_state").is_dir():
         return JSONResponse({"error": "이어서 학습할 체크포인트가 없습니다 (last/training_state 없음 — 가져온 모델은 학습 상태가 빠져 있을 수 있습니다)"},
                             status_code=400)
+    blocked = policy_resume_block(load_json(last / "pretrained_model" / "config.json", {}).get("type"))
+    if blocked:
+        return JSONResponse({"error": blocked}, status_code=400)
     done = load_json(last / "training_state" / "training_step.json", {}).get("step") or 0
     steps = _clamp_int(b.get("steps"), 0, 1, 100000000)
     if steps <= done:
@@ -5028,6 +5247,7 @@ async def api_rollout(req: Request):
                 f"--ov.device={dev}", f"--ov.precision={prec}", f"--ov.fps={CFG['fps']}"]
     try:
         argv = (head + [f"--policy.path={ck}"] + robot_cli_args()
+                + ([f"--rename_map={json.dumps(rollout_rename_map(rel)[0])}"] if rollout_rename_map(rel)[0] else [])
                 + ["--strategy.type=base", f"--duration={dur}", f"--task={task}",
                    f"--fps={CFG['fps']}"])
     except (NotImplementedError, ValueError) as e:
