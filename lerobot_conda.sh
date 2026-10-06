@@ -18,7 +18,7 @@
 #     chmod +x lerobot_conda.sh
 #     sudo -v
 #     nohup ./lerobot_conda.sh > /dev/null 2>&1 &
-#     tail -f lerobot_conda.log
+#     sleep 3; tail -f lerobot_conda.log
 #
 #  끝나면:
 #     source ~/project/arm-lab/activate.sh      # conda 활성화 + ~/project/arm-lab 으로 이동

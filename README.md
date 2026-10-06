@@ -25,7 +25,7 @@ cd arm-lab
 chmod +x lerobot_conda.sh
 sudo -v
 nohup ./lerobot_conda.sh > /dev/null 2>&1 &
-tail -f lerobot_conda.log          # 끝날 때까지 지켜보기
+sleep 3; tail -f lerobot_conda.log # 끝날 때까지 지켜보기 (로그 파일이 생길 때까지 잠깐 기다림)
 ```
 
 conda 환경, PyTorch, lerobot, OMX 용 Dynamixel 패키지와 양팔 OMX 플러그인까지 설치합니다. 기기 종류는 자동으로 고릅니다.
