@@ -132,6 +132,17 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", MODE="0666", GROUP="dialout"
 RULES
 sudo udevadm control --reload-rules && sudo udevadm trigger || true
 
+# sudo 가 필요한 일은 전부 여기(시작 직후)서 끝냅니다 — nohup 으로 돌리면 뒤쪽에서는 sudo 인증 시간이 지나 조용히 실패합니다
+if [[ "${PLATFORM}" == "intel" ]]; then
+  log "0-1. Intel GPU 컴퓨트 런타임 (OpenVINO GPU · XPU 학습용 — 우분투 저장소, 실패해도 계속)"
+  # level-zero 로더 + Intel GPU 드라이버. 이름이 우분투 버전마다 다를 수 있어 하나씩 시도합니다 (26.04 이름은 확인 필요)
+  apt_one libze1 level-zero
+  apt_one libze-intel-gpu1 intel-level-zero-gpu
+  apt_one intel-opencl-icd
+  # /dev/accel(NPU), /dev/dri(GPU) 접근 권한
+  sudo usermod -aG render,video "${USER}" || true
+fi
+
 # --------------------------------------------------------------- 1. miniforge
 log "1. miniforge 설치"
 if [[ ! -d "${CONDA_DIR}" ]]; then
@@ -255,16 +266,8 @@ if [[ "${PLATFORM}" == "intel" ]]; then
   log "4-5. OpenVINO / NNCF (Intel NPU·GPU·CPU 추론)"
   PIP_CONSTRAINT=/tmp/torch-constraint.txt pip install "openvino>=2025.4" "nncf>=2.19" \
     || die "openvino 설치 실패"
-  # /dev/accel(NPU), /dev/dri(GPU) 접근 권한
-  sudo usermod -aG render,video "${USER}" || true
 
-  log "4-6. Intel GPU 컴퓨트 런타임 (OpenVINO GPU · XPU 학습용 — 우분투 저장소, 실패해도 계속)"
-  # level-zero 로더 + Intel GPU 드라이버. 이름이 우분투 버전마다 다를 수 있어 하나씩 시도합니다 (26.04 이름은 확인 필요)
-  apt_one libze1 level-zero
-  apt_one libze-intel-gpu1 intel-level-zero-gpu
-  apt_one intel-opencl-icd
-
-  log "4-7. Intel NPU / GPU 드라이버 점검 (NPU 사용자 공간 드라이버는 설치하지 않습니다 — 안내만)"
+  log "4-6. Intel NPU / GPU 드라이버 점검 (NPU 사용자 공간 드라이버는 설치하지 않습니다 — 안내만)"
   CPU_NAME="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
   echo "CPU : ${CPU_NAME}"
   if ! grep -qi 'Core(TM) Ultra' <<<"${CPU_NAME}"; then
