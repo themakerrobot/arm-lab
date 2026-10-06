@@ -268,17 +268,21 @@ if [[ "${PLATFORM}" == "intel" ]]; then
   if ! grep -qi 'Core(TM) Ultra' <<<"${CPU_NAME}"; then
     warn "Core Ultra 가 아닙니다 — NPU 가 없을 수 있습니다. OpenVINO GPU/CPU 로만 추론합니다"
   fi
-  if [[ -e /dev/accel/accel0 ]]; then
-    echo "NPU : /dev/accel/accel0 있음 (intel_vpu 커널 드라이버 로드됨)"
+  # 판정은 OpenVINO 가 실제로 장치를 보는지로 합니다 — 패키지 이름은 우분투 버전마다 달라 dpkg 로 보면 틀립니다(26.04 에서 확인)
+  OV_DEVS="$(python -c "import openvino as ov; print(' '.join(ov.Core().available_devices))" 2>/dev/null || true)"
+  echo "OpenVINO 장치: ${OV_DEVS:-없음}"
+  if grep -qw NPU <<<"${OV_DEVS}"; then
+    echo "NPU : OpenVINO 에서 사용 가능"
+  elif [[ -e /dev/accel/accel0 ]]; then
+    warn "NPU 장치(/dev/accel/accel0)는 있지만 OpenVINO 가 못 잡습니다 — 사용자 공간 NPU 드라이버 또는 render 그룹(재로그인) 확인"
+    warn "  → https://github.com/intel/linux-npu-driver/releases (우분투 버전별 패키지는 릴리스 노트로 확인 필요)"
   else
-    warn "NPU 장치(/dev/accel/accel0) 없음. 커널 intel_vpu 모듈과 사용자 공간 드라이버가 필요합니다."
-    warn "  → https://github.com/intel/linux-npu-driver/releases 에서 Ubuntu 버전에 맞는 .deb 설치 후 재부팅"
-    warn "  (커널/드라이버 버전 조합은 해당 릴리스 노트로 확인 필요 — 우분투 26.04 용 패키지가 따로 있는지도 확인 필요)"
+    warn "NPU 장치(/dev/accel/accel0) 없음 — 커널 intel_vpu 드라이버와 사용자 공간 NPU 드라이버가 필요합니다. 없으면 GPU/CPU 로 추론"
   fi
-  if ls /dev/dri/renderD* >/dev/null 2>&1; then
-    echo "GPU : $(ls /dev/dri/renderD* | tr '\n' ' ')"
-    dpkg -l 2>/dev/null | grep -qE 'intel-opencl-icd|libze-intel-gpu1|intel-level-zero-gpu' \
-      || warn "Intel GPU 컴퓨트 런타임(intel-opencl-icd / level-zero) 미설치 — OpenVINO GPU 를 쓰려면 https://github.com/intel/compute-runtime/releases 참고"
+  if grep -qw GPU <<<"${OV_DEVS}"; then
+    echo "GPU : OpenVINO 에서 사용 가능"
+  elif ls /dev/dri/renderD* >/dev/null 2>&1; then
+    warn "GPU render 노드는 있지만 OpenVINO 가 못 잡습니다 — Intel GPU 컴퓨트 런타임(level-zero/OpenCL) 또는 render 그룹(재로그인) 확인"
   else
     warn "GPU render 노드(/dev/dri/renderD*) 없음"
   fi
