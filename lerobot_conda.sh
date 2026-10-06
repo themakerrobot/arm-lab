@@ -6,8 +6,10 @@
 #    cuda  : x86_64 + NVIDIA GPU (CUDA 13)
 #    intel : x86_64 + NVIDIA 없음 (Intel Core Ultra — Meteor Lake 이상 권장)
 #            → PyTorch CPU 휠 + OpenVINO/NNCF. 추론은 NPU/GPU/CPU 를 OpenVINO 로 씁니다.
-#            학습은 이 경로에서 CPU 로만 돌아 매우 느립니다 — 학습은 CUDA 기기에서 하세요.
+#            학습은 기본(CPU 휠)으로는 매우 느립니다 — HF Jobs 클라우드 학습이나 CUDA 기기를 쓰세요.
+#            실험적: ARMLAB_TORCH=xpu 면 PyTorch XPU 휠을 받아 내장 Arc GPU 로 학습합니다 (실기 검증 전).
 #  강제 지정: ARMLAB_PLATFORM=intel ./lerobot_conda.sh   (thor | cuda | intel)
+#  Intel GPU 학습(실험적): ARMLAB_PLATFORM=intel ARMLAB_TORCH=xpu ./lerobot_conda.sh
 #
 #  새 기기에서:
 #     mkdir -p ~/project && cd ~/project
@@ -41,6 +43,7 @@ LEROBOT_COMMIT="e40b58a8dfa9e7b86918c374791599d070518d11"   # README 와 동일.
 DATA_DIR="${WORKDIR}/data"
 
 ARCH="$(uname -m)"
+TORCH_FLAVOR="${ARMLAB_TORCH:-cpu}"        # intel 전용: cpu(기본) | xpu(실험적 — 내장/외장 Intel GPU 로 PyTorch 학습)
 PLATFORM="${ARMLAB_PLATFORM:-}"
 if [[ -z "${PLATFORM}" ]]; then
   if [[ "${ARCH}" == "aarch64" ]]; then
@@ -70,7 +73,12 @@ case "${PLATFORM}" in
   intel)
     [[ "${ARCH}" == "x86_64" ]] || { echo "intel 플랫폼은 x86_64 전용입니다 (현재 ${ARCH})"; exit 1; }
     MINIFORGE="Miniforge3-Linux-x86_64.sh"
-    TORCH_INDEXES=("https://download.pytorch.org/whl/cpu" "https://pypi.org/simple")
+    case "${TORCH_FLAVOR}" in
+      cpu) TORCH_INDEXES=("https://download.pytorch.org/whl/cpu" "https://pypi.org/simple") ;;
+      # XPU 휠이 없거나 못 받으면 CPU 휠로 내려갑니다 (설치가 멈추지 않게). 실제로 무엇이 깔렸는지는 3-1 에서 표시
+      xpu) TORCH_INDEXES=("https://download.pytorch.org/whl/xpu" "https://download.pytorch.org/whl/cpu" "https://pypi.org/simple") ;;
+      *) echo "ARMLAB_TORCH 는 cpu | xpu 중 하나: ${TORCH_FLAVOR}"; exit 1 ;;
+    esac
     TORCH_PKGS="torch<2.12 torchvision<0.27"
     ;;
   *) echo "ARMLAB_PLATFORM 은 thor | cuda | intel 중 하나: ${PLATFORM}"; exit 1 ;;
@@ -149,9 +157,19 @@ done
 
 check_cuda() {
 if [[ "${PLATFORM}" == "intel" ]]; then
-python - <<'PY'
-import torch
-print("torch      :", torch.__version__, "(Intel 경로 — CPU 휠. 추론 가속은 OpenVINO 가 담당)")
+# TORCH_LOCAL: 3단계에서 실제로 깔린 휠의 꼬리표(xpu / cpu / 없음). 이후 lerobot 설치가 XPU 휠을 CPU 휠로 바꾸면 실패로 봅니다
+TORCH_LOCAL="${TORCH_LOCAL:-}" python - <<'PY'
+import os, sys, torch
+local = torch.__version__.split("+")[1] if "+" in torch.__version__ else ""
+want = os.environ.get("TORCH_LOCAL", "")
+xpu = hasattr(torch, "xpu") and torch.xpu.is_available()
+print("torch      :", torch.__version__, "| xpu:", xpu, "(추론 가속은 OpenVINO 가 담당)")
+if xpu:
+    print("xpu device :", torch.xpu.get_device_name(0))
+elif local == "xpu":
+    print("!! XPU 휠이지만 Intel GPU 를 못 잡았습니다 — compute-runtime(level-zero) 드라이버·render 그룹(재로그인) 확인. 학습은 CPU 로 돌아갑니다")
+if want == "xpu" and local != "xpu":
+    print("!! XPU 휠이 다른 휠로 바뀌었습니다"); sys.exit(1)
 PY
 return
 fi
@@ -166,6 +184,11 @@ else:
     sys.exit(1)
 PY
 }
+TORCH_LOCAL="$(python -c "import torch;v=torch.__version__;print(v.split('+')[1] if '+' in v else '')")"
+export TORCH_LOCAL
+if [[ "${PLATFORM}" == "intel" && "${TORCH_FLAVOR}" == "xpu" && "${TORCH_LOCAL}" != "xpu" ]]; then
+  warn "XPU 휠을 받지 못해 ${TORCH_LOCAL:-기본} 휠을 설치했습니다 — Intel GPU 학습 없이 계속합니다 (추론은 OpenVINO 로 그대로 가능)"
+fi
 log "3-1. torch 확인 (thor/cuda 는 CUDA 인식 필수)"
 check_cuda || die "CUDA 미인식. 여기서 멈춥니다"
 
@@ -209,7 +232,7 @@ PIP_CONSTRAINT=/tmp/torch-constraint.txt pip install --no-deps \
   || die "양팔 OMX 플러그인 설치 실패"
 
 log "4-4. torch 가 덮어써지지 않았는지 재확인"
-check_cuda || die "lerobot 설치 과정에서 torch 가 CPU 휠로 바뀌었습니다. pip uninstall -y torch torchvision 후 3단계 인덱스로 재설치"
+check_cuda || die "lerobot 설치 과정에서 torch 휠이 바뀌었습니다. pip uninstall -y torch torchvision 후 3단계 인덱스로 재설치"
 
 if [[ "${PLATFORM}" == "intel" ]]; then
   log "4-5. OpenVINO / NNCF (Intel NPU·GPU·CPU 추론)"
@@ -244,7 +267,8 @@ fi
 log "5. 최종 검증"
 python - <<'PY'
 import torch
-print("torch   :", torch.__version__, "| cuda:", torch.cuda.is_available())
+print("torch   :", torch.__version__, "| cuda:", torch.cuda.is_available(),
+      "| xpu:", hasattr(torch, "xpu") and torch.xpu.is_available())
 try:
     import openvino as ov
     print("openvino:", ov.__version__, "| devices:", ov.Core().available_devices)
@@ -282,7 +306,7 @@ chmod +x "${WORKDIR}/activate.sh"
 log "완료"
 cat <<EOF
 
-  플랫폼    : ${PLATFORM}
+  플랫폼    : ${PLATFORM}$( [[ "${PLATFORM}" == "intel" ]] && echo " (torch 휠: ${TORCH_LOCAL:-기본})" || true )
   conda env : ${ENV_NAME}  (python ${PY_VER})
   lerobot   : ${LEROBOT_SRC} @ ${LEROBOT_COMMIT:0:8}
   데이터    : ${DATA_DIR}   (HF_HOME=${DATA_DIR}/hf → 캘리브레이션은 \$HF_HOME/lerobot/calibration)
@@ -303,5 +327,6 @@ cat <<EOF
   * 학습 시 GPU 를 쓰는 다른 서비스(vLLM 등)는 내리세요.
   * intel: Training 탭 → 체크포인트 "OpenVINO 변환" → Rollout 탭에서 추론 엔진 NPU/GPU/CPU 선택.
            render 그룹 반영(NPU/GPU 권한)을 위해 재로그인 필요.
+           학습은 Training 탭 실행 위치에서 HF Jobs 를 고르세요 (XPU 휠이면 이 기기 Intel GPU 로도 가능 — 실험적).
 
 EOF

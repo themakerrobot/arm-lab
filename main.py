@@ -3520,7 +3520,7 @@ def policy_fit(rel):
     if ptype in GPU_POLICIES and not local_cuda().get("ok"):
         warns.append(f"{ptype} 은 CUDA GPU 용입니다 — 이 기기에서 GPU 를 찾지 못해 매우 느리거나 메모리가 부족할 수 있습니다")
     if ptype == "diffusion" and (cfg.get("num_inference_steps") or cfg.get("num_train_timesteps") or 100) > 20 \
-            and not local_cuda().get("ok"):
+            and not (local_cuda().get("ok") or local_cuda().get("xpu")):
         warns.append(f"Diffusion 디노이징 {cfg.get('num_inference_steps') or cfg.get('num_train_timesteps') or 100}회 — GPU 없이 CPU 로는 "
                      "동작 묶음 하나에 수 초~수십 초 걸립니다. 학습 때 '빠른 추론 (DDIM 10회)' 를 켜세요")
     return errs, warns
@@ -3718,17 +3718,20 @@ _CUDA = {"t": 0.0, "v": None}
 
 
 def local_cuda(refresh=False):
-    """이 기기 CUDA GPU — {"ok", "name", "vram_gb"} (torch 를 별도 프로세스에서 한 번 조회해 10분 캐시).
-    arm-lab 본체는 torch 를 import 하지 않으므로 하위 프로세스로 묻습니다."""
+    """이 기기 학습 장치 — {"ok"(CUDA), "name", "vram_gb", "xpu"(Intel GPU), "xpu_name"} (torch 를 별도 프로세스에서
+    한 번 조회해 10분 캐시). arm-lab 본체는 torch 를 import 하지 않으므로 하위 프로세스로 묻습니다.
+    lerobot-train 은 CUDA → XPU → CPU 순으로 알아서 고릅니다 (Accelerate 자동 감지)."""
     if not refresh and _CUDA["v"] is not None and time.time() - _CUDA["t"] < 600:
         return _CUDA["v"]
     code = ("import json,torch;ok=torch.cuda.is_available();p=torch.cuda.get_device_properties(0) if ok else None;"
-            "print(json.dumps({'ok':ok,'name':p.name if p else '','vram_gb':round(p.total_memory/2**30,1) if p else 0}))")
+            "x=(not ok) and hasattr(torch,'xpu') and torch.xpu.is_available();"
+            "print(json.dumps({'ok':ok,'name':p.name if p else '','vram_gb':round(p.total_memory/2**30,1) if p else 0,"
+            "'xpu':bool(x),'xpu_name':torch.xpu.get_device_name(0) if x else '','torch':torch.__version__}))")
     try:
         r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
         v = json.loads(r.stdout.strip().splitlines()[-1])
     except Exception as e:      # noqa: BLE001
-        v = {"ok": False, "name": "", "vram_gb": 0, "error": str(e)[:200]}
+        v = {"ok": False, "name": "", "vram_gb": 0, "xpu": False, "xpu_name": "", "error": str(e)[:200]}
     _CUDA.update(t=time.time(), v=v)
     return v
 
@@ -4005,12 +4008,17 @@ def api_train_check(dataset: str = "", policy: str = "act", opts: str = "", targ
     if policy not in TRAIN_POLICIES or not safe_name(dataset) or not (DATA_ROOT / dataset / "meta/info.json").is_file():
         return {"error": "", "warnings": []}
     _, err, warns = policy_train_args(policy, DATA_ROOT / dataset, [o for o in opts.split(",") if o])
-    if not err and target == "local" and TRAIN_POLICIES[policy].get("gpu"):
+    if not err and target == "local":
         cu = local_cuda()
-        if not cu.get("ok"):
+        if TRAIN_POLICIES[policy].get("gpu") and not cu.get("ok"):
             warns.append("이 기기에서 CUDA GPU 를 찾지 못했습니다 — 실행 위치를 HF Jobs 로 고르세요")
-        else:
+        elif cu.get("ok"):
             warns.append(f"GPU: {cu.get('name')} · {cu.get('vram_gb')} GiB")
+        elif cu.get("xpu"):
+            warns.append(f"Intel GPU(XPU) {cu.get('xpu_name')} 로 학습합니다 — 실험적 기능입니다 (실기 검증 전). "
+                         "느리거나 실패하면 실행 위치를 HF Jobs 로 고르세요")
+        else:
+            warns.append("이 기기에는 학습 가속 장치가 없어 CPU 로 학습합니다 — 매우 느립니다. 실행 위치를 HF Jobs 로 고르세요")
     return {"error": err, "warnings": warns}
 
 

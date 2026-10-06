@@ -36,7 +36,9 @@ conda 환경, PyTorch, lerobot, OMX 용 Dynamixel 패키지와 양팔 OMX 플러
 | `cuda` | x86_64 + NVIDIA GPU | CUDA 13 휠 | PyTorch (GPU) |
 | `intel` | x86_64 + NVIDIA 없음 (Core Ultra 권장) | CPU 휠 + **OpenVINO / NNCF** | OpenVINO **NPU / GPU / CPU** |
 
-자동 판정이 틀리면 `ARMLAB_PLATFORM=intel ./lerobot_conda.sh` 처럼 지정합니다. Intel 쪽은 아래
+자동 판정이 틀리면 `ARMLAB_PLATFORM=intel ./lerobot_conda.sh` 처럼 지정합니다.
+Intel 기기에서 내장 Arc GPU 로 학습까지 해 보려면 `ARMLAB_PLATFORM=intel ARMLAB_TORCH=xpu ./lerobot_conda.sh` (**실험적**, 아래 참고).
+Intel 쪽은 아래
 [Intel Core Ultra 에서 추론](#intel-core-ultra-에서-추론--openvino) 을 보세요.
 
 ### 이미 설치된 기기 업데이트
@@ -298,7 +300,8 @@ Hugging Face Hub 와 주고받습니다.
 
 ## Intel Core Ultra 에서 추론 — OpenVINO
 
-학습은 NVIDIA 기기(Thor 등)에서 하고, 추론만 Intel Core Ultra 노트북·미니PC 의 **NPU** 로 돌리는 구성입니다.
+Ubuntu Intel Core Ultra 노트북·미니PC 에서 셋업·캘리브레이션·Control·수집·리뷰는 Thor 와 똑같이 되고,
+추론은 OpenVINO 로 **NPU** 에서 돌립니다. 학습은 아래 [Intel 기기에서 학습](#intel-기기에서-학습) 중 하나를 고르세요.
 **Meteor Lake (Core Ultra 1세대) 이상**을 기준으로 합니다. 지금은 **ACT** 정책만 지원합니다.
 
 **1. 설치** — Intel 기기에서 위 [설치](#설치) 그대로 실행하면 `intel` 플랫폼으로 잡혀 OpenVINO 까지 설치됩니다.
@@ -333,7 +336,24 @@ p95 가 프레임 예산(30 fps 면 33 ms) 안이고 오차가 작으면 **OK** 
 - 체크포인트를 다시 학습·덮어쓰면 **OV(다시 변환 필요)** 로 표시되고 시작이 막힙니다 — 다시 변환하세요.
 - 추론 중 로그에 `[ov] 추론 … ms` 가 주기적으로 찍힙니다. 프레임 예산을 넘으면 청크가 바뀌는 순간 한 박자 멈출 수 있습니다.
 - INT8 은 더 빠를 수 있지만 오차가 커집니다. 표의 오차·판정을 보고 고르세요. 기본은 FP16 입니다.
-- Intel 기기에서 학습은 CPU 로만 돌아 매우 느립니다 — 학습은 NVIDIA 기기에서 하세요.
+
+### Intel 기기에서 학습
+
+Training 탭은 이 기기의 학습 장치를 표시합니다 (`GPU: …` / `Intel GPU(XPU) … — 실험적` / `CPU 로 학습 — 매우 느립니다`).
+
+| 방법 | 어떻게 | 비고 |
+|---|---|---|
+| **HF Jobs (권장)** | Training 탭 **실행 위치** 에서 HF Jobs GPU 선택 | 기기와 무관. 유료(시간당), Hub 로그인 필요. 끝나면 Hub 탭에서 모델 받기 → OpenVINO 변환 |
+| **NVIDIA 기기** | Thor 등에서 학습 → Models 내보내기 → Intel 기기에서 가져오기 | 위 2단계 |
+| **이 기기 Intel GPU (실험적)** | 설치 때 `ARMLAB_TORCH=xpu` → 실행 위치 '이 기기' | PyTorch XPU 휠 + lerobot 자동 장치 선택. **실기 검증 전** — ACT 기준 |
+| 이 기기 CPU | 기본 설치 그대로 '이 기기' | 매우 느림. 동작 확인용 |
+
+XPU 경로 알아 둘 것
+- 설치 스크립트가 XPU 휠을 못 받으면 CPU 휠로 내려가 계속 설치하고 로그에 경고를 남깁니다. 끝에 `torch 휠: xpu` 로 나와야 합니다.
+- Intel GPU 컴퓨트 런타임(위 GPU 항목의 compute-runtime / level-zero)이 있어야 `xpu: True` 로 잡힙니다. 설치 후 재로그인(render 그룹).
+- 학습한 체크포인트는 그대로 OpenVINO 변환·NPU 추론에 쓸 수 있습니다 (변환은 항상 CPU 에서 PyTorch 결과와 대조).
+- X-VLA·MolmoAct2 는 CUDA 전용이라 XPU 로도 학습할 수 없습니다 — HF Jobs 를 쓰세요.
+- XPU 에서 어떤 정책·batch 가 메모리(내장 GPU 는 시스템 RAM 공유)에 들어가는지는 **확인 필요**입니다.
 
 ## 팔 없이 시험하기 — 가상 팔
 

@@ -427,6 +427,17 @@ LeLab 에 있지만 넣지 않은 것: 온보딩 투어(셋업 마법사가 대�
   키 아래 값은 바꾸지 않습니다(`I18N_KEEP_KEYS`). 영어 화면에서 불러와 그대로 저장해도 한국어 태스크 설명이 망가지지 않습니다.
 - **화면 문자열을 고치면** 사전도 고칩니다(CLAUDE.md). 새 조각은 소스에서 다시 뽑아 사전에 없는 키만 번역해 넣으면 됩니다.
 
+## Intel 기기 학습 (XPU, 실험적)
+
+- `lerobot_conda.sh`: `intel` 플랫폼에서 `ARMLAB_TORCH=xpu` 면 `download.pytorch.org/whl/xpu` → `whl/cpu` → PyPI 순으로 torch 를 받습니다.
+  받은 휠의 꼬리표(`TORCH_LOCAL`)를 기억해 두고, 4-4 재확인에서 XPU 휠이 다른 휠로 바뀌었으면 멈춥니다. 제약 파일은 꼬리표를 떼므로
+  (`torch==2.11.0`) 이후 lerobot·정책 패키지 설치가 XPU 휠을 그대로 유지합니다 (PEP 440 로컬 버전 규칙, CUDA 휠과 같은 원리).
+- arm-lab 은 학습 인자를 바꾸지 않습니다. lerobot-train 의 Accelerate 가 CUDA → XPU → CPU 를 자동 감지하고,
+  Thor 에서 학습한 체크포인트(`device: cuda`)도 `PreTrainedConfig.__post_init__` 이 쓸 수 있는 장치로 바꿉니다.
+- `local_cuda()` 는 CUDA 가 없을 때 `torch.xpu` 도 물어 Training 탭 점검에 장치를 표시합니다. GPU 필수 정책(X-VLA·MolmoAct2)은 CUDA 만 인정.
+- 시험 서버에 Intel GPU 가 없고 `download.pytorch.org` 도 막혀 있어 XPU 휠 설치·학습은 **실측하지 못했습니다**.
+  확인한 것: 스크립트 문법, 휠 꼬리표 판정 스크립트(바뀐 휠 → 실패), 화면 점검 문구.
+
 ## lerobot 버전·설치
 
 - lerobot commit `e40b58a8dfa9e7b86918c374791599d070518d11` 에 맞춰져 있습니다 (`lerobot_conda.sh` 의 `LEROBOT_COMMIT`)
