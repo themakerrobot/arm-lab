@@ -30,6 +30,18 @@ tail -f lerobot_conda.log          # 끝날 때까지 지켜보기
 
 conda 환경, PyTorch, lerobot, OMX 용 Dynamixel 패키지와 양팔 OMX 플러그인까지 설치합니다. 기기 종류는 자동으로 고릅니다.
 
+**여러 사람이 쓰는 PC 에서도 다른 사람 환경을 바꾸지 않습니다.**
+- conda(miniforge)는 `~/miniforge3` 에 **설치만** 합니다. `conda init` 을 하지 않아 `~/.bashrc` 가 그대로이고, 터미널을 열어도 conda 가 켜지지 않습니다.
+  `~/.condarc` 도 쓰지 않습니다.
+- torch·lerobot·openvino 등 파이썬 패키지는 전부 conda 환경 `arm-lab` 안에만 들어갑니다. 시스템 python·pip 는 그대로입니다.
+- 쓸 때만 `source ~/project/arm-lab/activate.sh` 로 그 터미널에서 켭니다. 데이터·HF 캐시·torch 캐시도 레포 `data/` 안에 둡니다.
+- 시스템에 하는 일: apt 기본 도구 몇 개(git, curl, build-essential, pkg-config, libgl1, libglib2.0, v4l-utils · Intel 은 GPU 런타임),
+  시리얼 보드 udev 권한 규칙, 설치한 계정을 `dialout`·`video`(Intel 은 `render`) 그룹에 추가 — 그룹 반영은 **재로그인 후**.
+- 지우기: `rm -rf ~/project/arm-lab ~/miniforge3` (다른 conda 를 이미 쓰고 있었다면 `~/miniforge3` 는 이 스크립트가 만든 것인지 확인 후)
+
+Ubuntu 22.04 / 24.04 / 26.04 를 대상으로 합니다. 파이썬은 conda 안의 3.12 를 쓰므로 우분투 기본 파이썬 버전과 무관합니다.
+우분투 버전마다 이름이 바뀐 apt 패키지는 대체 이름으로 다시 시도하고, 그래도 없으면 경고만 남기고 계속합니다.
+
 | 플랫폼 | 고르는 조건 | PyTorch | 추론 |
 |---|---|---|---|
 | `thor` | aarch64 (Jetson Thor) | CUDA 13 휠 | PyTorch (GPU) |

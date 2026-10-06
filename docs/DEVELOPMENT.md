@@ -440,6 +440,10 @@ LeLab 에 있지만 넣지 않은 것: 온보딩 투어(셋업 마법사가 대�
 
 ## lerobot 버전·설치
 
+설치 스크립트는 공용 PC 를 전제로 사용자 환경을 바꾸지 않습니다: miniforge 는 `-b`(배치) 설치만 하고 `conda init`·`conda config` 를
+부르지 않습니다(`~/.bashrc`·`~/.condarc` 무변경). 파이썬 패키지는 전부 env 안, 캐시는 `activate.sh` 의 `HF_HOME`·`TORCH_HOME`(레포 `data/`).
+apt 는 `apt_one` 으로 한 개씩·대체 이름 순서로 설치하고 실패해도 경고만 합니다 (24.04+ 의 `*t64` 개명, 26.04 이름 변화 대비).
+
 - lerobot commit `e40b58a8dfa9e7b86918c374791599d070518d11` 에 맞춰져 있습니다 (`lerobot_conda.sh` 의 `LEROBOT_COMMIT`)
 - `pip install -e "lerobot-src[feetech,dynamixel,training,diffusion,smolvla]"`, 그다음 `torchcodec` 제거 + `av>=15,<16` (pyav 디코딩)
 - 양팔 OMX: `pip install --no-deps -e plugins/lerobot_robot_bi_omx -e plugins/lerobot_teleoperator_bi_omx`

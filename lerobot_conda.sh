@@ -25,6 +25,13 @@
 #     nohup python main.py > arm-lab.log 2>&1 &
 #     → http://<ip>:8080/setup 에서 포트·카메라 지정, /calib 에서 캘리브레이션
 #
+#  다른 사람 환경을 건드리지 않습니다 (여러 사람이 쓰는 PC 기준):
+#   - conda(miniforge)는 ~/miniforge3 에 '설치만' 합니다. conda init 을 하지 않으므로 ~/.bashrc 가 바뀌지 않고,
+#     터미널을 열어도 conda 가 켜지지 않습니다. ~/.condarc 도 쓰지 않습니다.
+#   - 파이썬 패키지(torch·lerobot·openvino …)는 전부 conda 환경 'arm-lab' 안에만 들어갑니다. 시스템 python·pip 는 그대로.
+#   - 쓸 때만 source ~/project/arm-lab/activate.sh 로 켭니다 (그 터미널에서만). 데이터·HF 캐시·torch 캐시도 레포 data/ 안.
+#   - 시스템에 하는 일은 이것뿐: apt 기본 도구/런타임 몇 개, 시리얼 보드 udev 권한 규칙, 내 계정을 dialout·video(·render) 그룹에 추가.
+#
 #  핵심 주의사항 (Thor):
 #   1) PyTorch 를 pip 기본 인덱스에서 받으면 CUDA 를 못 잡습니다.
 #      aarch64-sbsa / CUDA 13 전용 휠 인덱스를 써야 합니다.
@@ -97,13 +104,23 @@ log "시작. arch=${ARCH} platform=${PLATFORM} 작업경로=${WORKDIR}"
 [[ -f "${WORKDIR}/main.py" ]] || die "${WORKDIR}/main.py 가 없습니다. 이 레포를 ~/project/arm-lab 에 clone 한 뒤 실행하세요"
 
 # ------------------------------------------------------------- 0. 시스템 의존성
-log "0. 시스템 패키지"
+log "0. 시스템 패키지 (최소한만 — 파이썬 패키지는 전부 conda 환경 안에 설치)"
 sudo apt-get update -qq
-sudo apt-get install -y \
-  git cmake build-essential pkg-config \
-  ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-  libgl1 libglib2.0-0 libusb-1.0-0-dev v4l-utils \
-  python3-pip curl
+# 하나씩 설치합니다 — 우분투 버전마다 이름이 바뀐 패키지(24.04+ 의 *t64 등)가 있어 한 개 실패로 전체가 멈추지 않게.
+#   git·curl         : 소스 받기
+#   build-essential·pkg-config : 휠이 없는 파이썬 패키지(evdev 등) 빌드용 컴파일러
+#   libgl1·libglib2.0 : OpenCV(pip 휠) 실행 라이브러리 — 데스크톱 우분투엔 보통 이미 있음
+#   v4l-utils        : 카메라 확인용 v4l2-ctl (문제 생겼을 때 진단)
+# 영상 인코딩은 PyAV 휠에 FFmpeg 가 들어 있어 시스템 ffmpeg 는 설치하지 않습니다.
+apt_one() {   # apt_one 이름 [대체이름…] — 앞에서부터 처음 설치되는 것 하나
+  local p
+  for p in "$@"; do
+    if sudo apt-get install -y -qq "${p}" >/dev/null 2>&1; then echo "  apt: ${p}"; return 0; fi
+  done
+  warn "apt 설치 실패: $* (이 우분투 버전에 없는 이름일 수 있습니다 — 확인 필요)"
+}
+for p in git curl build-essential pkg-config libgl1 v4l-utils; do apt_one "${p}"; done
+apt_one libglib2.0-0t64 libglib2.0-0
 
 # 시리얼(모터 보드)·카메라 권한. udev 심볼릭 링크는 만들지 않습니다 — 포트는 웹 Setup 탭에서 지정합니다.
 sudo usermod -aG dialout,video "${USER}" || true
@@ -125,16 +142,16 @@ else
   echo "이미 설치됨: ${CONDA_DIR}"
 fi
 
+# conda init 을 하지 않습니다 — 이 스크립트 안에서만 conda 를 켭니다 (~/.bashrc·~/.condarc 무변경)
 # shellcheck disable=SC1091
 source "${CONDA_DIR}/etc/profile.d/conda.sh"
-conda config --set always_yes true --set changeps1 false || true
 
 # ---------------------------------------------------------------- 2. conda env
 log "2. conda 환경 생성 (python ${PY_VER})"
 if conda env list | grep -qE "^${ENV_NAME}\s"; then
   echo "환경 이미 존재: ${ENV_NAME}"
 else
-  conda create -n "${ENV_NAME}" "python=${PY_VER}" -y
+  conda create -n "${ENV_NAME}" "python=${PY_VER}" -y -q
 fi
 conda activate "${ENV_NAME}"
 python -V
@@ -241,7 +258,13 @@ if [[ "${PLATFORM}" == "intel" ]]; then
   # /dev/accel(NPU), /dev/dri(GPU) 접근 권한
   sudo usermod -aG render,video "${USER}" || true
 
-  log "4-6. Intel NPU / GPU 드라이버 점검 (설치는 하지 않습니다 — 안내만)"
+  log "4-6. Intel GPU 컴퓨트 런타임 (OpenVINO GPU · XPU 학습용 — 우분투 저장소, 실패해도 계속)"
+  # level-zero 로더 + Intel GPU 드라이버. 이름이 우분투 버전마다 다를 수 있어 하나씩 시도합니다 (26.04 이름은 확인 필요)
+  apt_one libze1 level-zero
+  apt_one libze-intel-gpu1 intel-level-zero-gpu
+  apt_one intel-opencl-icd
+
+  log "4-7. Intel NPU / GPU 드라이버 점검 (NPU 사용자 공간 드라이버는 설치하지 않습니다 — 안내만)"
   CPU_NAME="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
   echo "CPU : ${CPU_NAME}"
   if ! grep -qi 'Core(TM) Ultra' <<<"${CPU_NAME}"; then
@@ -252,7 +275,7 @@ if [[ "${PLATFORM}" == "intel" ]]; then
   else
     warn "NPU 장치(/dev/accel/accel0) 없음. 커널 intel_vpu 모듈과 사용자 공간 드라이버가 필요합니다."
     warn "  → https://github.com/intel/linux-npu-driver/releases 에서 Ubuntu 버전에 맞는 .deb 설치 후 재부팅"
-    warn "  (커널/드라이버 버전 조합은 해당 릴리스 노트로 확인 필요)"
+    warn "  (커널/드라이버 버전 조합은 해당 릴리스 노트로 확인 필요 — 우분투 26.04 용 패키지가 따로 있는지도 확인 필요)"
   fi
   if ls /dev/dri/renderD* >/dev/null 2>&1; then
     echo "GPU : $(ls /dev/dri/renderD* | tr '\n' ' ')"
@@ -298,6 +321,7 @@ cat > "${WORKDIR}/activate.sh" <<EOF
 source "$(h "${CONDA_DIR}")/etc/profile.d/conda.sh"
 conda activate ${ENV_NAME}
 export HF_HOME="$(h "${DATA_DIR}")/hf"
+export TORCH_HOME="$(h "${DATA_DIR}")/torch"
 cd "$(h "${WORKDIR}")"
 EOF
 chmod +x "${WORKDIR}/activate.sh"
