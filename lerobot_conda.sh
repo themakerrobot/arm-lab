@@ -133,14 +133,9 @@ RULES
 sudo udevadm control --reload-rules && sudo udevadm trigger || true
 
 # sudo 가 필요한 일은 전부 여기(시작 직후)서 끝냅니다 — nohup 으로 돌리면 뒤쪽에서는 sudo 인증 시간이 지나 조용히 실패합니다
+# Intel NPU·GPU 드라이버는 설치하지 않습니다 (뒤 4-6 에서 있는지만 점검·안내). 장치 접근 권한 그룹만 추가.
 if [[ "${PLATFORM}" == "intel" ]]; then
-  log "0-1. Intel GPU 컴퓨트 런타임 (OpenVINO GPU · XPU 학습용 — 우분투 저장소, 실패해도 계속)"
-  # level-zero 로더 + Intel GPU 드라이버. 이름이 우분투 버전마다 다를 수 있어 하나씩 시도합니다 (26.04 이름은 확인 필요)
-  apt_one libze1 level-zero
-  apt_one libze-intel-gpu1 intel-level-zero-gpu
-  apt_one intel-opencl-icd
-  # /dev/accel(NPU), /dev/dri(GPU) 접근 권한
-  sudo usermod -aG render,video "${USER}" || true
+  sudo usermod -aG render,video "${USER}" || true     # /dev/accel(NPU), /dev/dri(GPU)
 fi
 
 # --------------------------------------------------------------- 1. miniforge

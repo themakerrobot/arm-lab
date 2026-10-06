@@ -35,7 +35,7 @@ conda 환경, PyTorch, lerobot, OMX 용 Dynamixel 패키지와 양팔 OMX 플러
   `~/.condarc` 도 쓰지 않습니다.
 - torch·lerobot·openvino 등 파이썬 패키지는 전부 conda 환경 `arm-lab` 안에만 들어갑니다. 시스템 python·pip 는 그대로입니다.
 - 쓸 때만 `source ~/project/arm-lab/activate.sh` 로 그 터미널에서 켭니다. 데이터·HF 캐시·torch 캐시도 레포 `data/` 안에 둡니다.
-- 시스템에 하는 일: apt 기본 도구 몇 개(git, curl, build-essential, pkg-config, libgl1, libglib2.0, v4l-utils · Intel 은 GPU 런타임),
+- 시스템에 하는 일: apt 기본 도구 몇 개(git, curl, build-essential, pkg-config, libgl1, libglib2.0, v4l-utils),
   시리얼 보드 udev 권한 규칙, 설치한 계정을 `dialout`·`video`(Intel 은 `render`) 그룹에 추가 — 그룹 반영은 **재로그인 후**.
 - 지우기: `rm -rf ~/project/arm-lab ~/miniforge3` (다른 conda 를 이미 쓰고 있었다면 `~/miniforge3` 는 이 스크립트가 만든 것인지 확인 후)
 
