@@ -361,6 +361,17 @@ Training 탭은 이 기기의 학습 장치를 표시합니다 (`GPU: …` / `In
 | **이 기기 Intel GPU (실험적)** | 설치 때 `ARMLAB_TORCH=xpu` → 실행 위치 '이 기기' | PyTorch XPU 휠 + lerobot 자동 장치 선택. **실기 검증 전** — ACT 기준 |
 | 이 기기 CPU | 기본 설치 그대로 '이 기기' | 매우 느림. 동작 확인용 |
 
+이미 CPU 휠로 설치한 기기를 XPU 로 바꾸기 (재설치 불필요, arm-lab 을 끄고):
+
+```bash
+source ~/project/arm-lab/activate.sh
+pip uninstall -y torch torchvision
+pip install "torch<2.12" "torchvision<0.27" --index-url https://download.pytorch.org/whl/xpu
+python -c "import torch; print(torch.__version__, torch.xpu.is_available())"     # 2.11.x+xpu True 이면 성공
+```
+되돌리기: 같은 명령에서 `whl/xpu` 대신 `whl/cpu`.
+Ubuntu 26.04 + Core Ultra 에서 `2.11.0+xpu True Intel(R) Graphics` 로 잡히는 것까지 확인했습니다 (학습 속도는 아직 실측 전).
+
 XPU 경로 알아 둘 것
 - 설치 스크립트가 XPU 휠을 못 받으면 CPU 휠로 내려가 계속 설치하고 로그에 경고를 남깁니다. 끝에 `torch 휠: xpu` 로 나와야 합니다.
 - Intel GPU 컴퓨트 런타임(위 GPU 항목의 compute-runtime / level-zero)이 있어야 `xpu: True` 로 잡힙니다. 설치 후 재로그인(render 그룹).
