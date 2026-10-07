@@ -436,7 +436,7 @@ LeLab 에 있지만 넣지 않은 것: 온보딩 투어(셋업 마법사가 대�
   Thor 에서 학습한 체크포인트(`device: cuda`)도 `PreTrainedConfig.__post_init__` 이 쓸 수 있는 장치로 바꿉니다.
 - `local_cuda()` 는 CUDA 가 없을 때 `torch.xpu` 도 물어 Training 탭 점검에 장치를 표시합니다. GPU 필수 정책(X-VLA·MolmoAct2)은 CUDA 만 인정.
 - 실기(Ubuntu 26.04, Core Ultra 내장 GPU): XPU 휠(torch 2.11.0+xpu, intel-opencl-rt·oneMKL 등 pip 런타임 동반) 설치 후 `torch.xpu.is_available()` True 확인.
-  학습 속도·메모리는 아직 실측 전. (시험 서버에는 Intel GPU 가 없어 학습은 여기서 못 돌림)
+  ACT 52M · batch 8 학습이 XPU 로 돌고(`'device': 'xpu'`) updt_s 1.166 / data_s 0.009 (GPU 계산 병목). 메모리 한계는 아직 확인 전.
   확인한 것: 스크립트 문법, 휠 꼬리표 판정 스크립트(바뀐 휠 → 실패), 화면 점검 문구.
 
 ## lerobot 버전·설치

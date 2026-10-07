@@ -1321,13 +1321,25 @@ def delete_job(jid):
     return True
 
 
+_LOGREC_RE = re.compile(r"(?:INFO|WARNING|ERROR|DEBUG) \d{4}-\d\d-\d\d ")
+
+
 def collapse_cr(text):
-    """진행 막대(tqdm 등)는 줄바꿈 없이 \r 로 같은 줄을 덮어씁니다 — 터미널처럼 줄마다 마지막 내용만 남깁니다."""
+    """진행 막대(tqdm 등)는 줄바꿈 없이 \r 로 같은 줄을 덮어씁니다 — 터미널처럼 줄마다 마지막 내용만 남깁니다.
+    lerobot 의 step 로그(INFO … step:200 …)는 막대 바로 뒤에 붙어 나오므로 떼어 내 따로 남깁니다."""
     out = []
     for line in text.split("\n"):
         if "\r" in line:
-            parts = [x for x in line.split("\r") if x.strip()]
-            line = parts[-1] if parts else ""
+            logs, bar = [], ""
+            for seg in line.split("\r"):
+                m = _LOGREC_RE.search(seg)
+                if m:
+                    logs.append(seg[m.start():])
+                    seg = seg[:m.start()]
+                if seg.strip():
+                    bar = seg
+            out.extend(logs)
+            line = bar
         out.append(line)
     return "\n".join(out)
 
@@ -3989,7 +4001,7 @@ def train_page():
       if(!window.Chart) return;              // CDN 을 못 받으면(오프라인) 그래프만 생략
       if(!chart){{chart=new Chart(document.getElementById('chart'),{{type:'line',
         data:{{labels:xs,datasets:[{{label:'loss',data:ys,borderColor:'#5d9dd6',
-          backgroundColor:'rgba(93,157,214,.08)',fill:true,pointRadius:0,borderWidth:1.5}}]}},
+          backgroundColor:'rgba(93,157,214,.08)',fill:true,pointRadius:c=>(c.dataset.data.length<20?3:0),borderWidth:1.5}}]}},
         options:{{animation:false,
           scales:{{y:{{type:'logarithmic',grid:{{color:'#28303a'}},ticks:{{color:'#8b98a7',font:{{family:'IBM Plex Mono',size:11}}}}}},
                    x:{{grid:{{display:false}},ticks:{{color:'#5d6a79',font:{{family:'IBM Plex Mono',size:10}},maxTicksLimit:10}}}}}},
@@ -4000,8 +4012,8 @@ def train_page():
       const tick={{color:'#8b98a7',font:{{family:'IBM Plex Mono',size:11}}}};
       if(!chart2){{chart2=new Chart(document.getElementById('chart2'),{{type:'line',
         data:{{labels:ex_x,datasets:[
-          {{label:'grad norm',data:g,borderColor:'#e07a3f',pointRadius:0,borderWidth:1.2,yAxisID:'y'}},
-          {{label:'lr',data:lr,borderColor:'#6cc070',pointRadius:0,borderWidth:1.2,yAxisID:'y1'}}]}},
+          {{label:'grad norm',data:g,borderColor:'#e07a3f',pointRadius:c=>(c.dataset.data.length<20?3:0),borderWidth:1.2,yAxisID:'y'}},
+          {{label:'lr',data:lr,borderColor:'#6cc070',pointRadius:c=>(c.dataset.data.length<20?3:0),borderWidth:1.2,yAxisID:'y1'}}]}},
         options:{{animation:false,
           scales:{{y:{{grid:{{color:'#28303a'}},ticks:tick,title:{{display:true,text:'grad norm',color:'#8b98a7'}}}},
                    y1:{{position:'right',grid:{{display:false}},ticks:{{...tick,callback:v=>Number(v).toExponential(1)}},title:{{display:true,text:'lr',color:'#8b98a7'}}}},
@@ -4089,7 +4101,7 @@ async def api_train(req: Request):
             f"--dataset.repo_id=local/{ds}", f"--dataset.root={root}",
             *pargs, f"--output_dir={out}",
             f"--steps={steps}", f"--batch_size={batch}", "--num_workers=4",
-            "--save_freq=10000", "--policy.push_to_hub=false"]
+            "--save_freq=10000", "--log_freq=50", "--policy.push_to_hub=false"]   # log_freq: 그래프 점 간격 (기본 200)
     if b.get("amp"):
         argv.append("--policy.use_amp=true")
     try:
@@ -4132,7 +4144,7 @@ def _cloud_train(b, flavor):
     name = (b.get("name") or "").strip()
     argv = [sys.executable, str(HUB_PY), "cloud-train", f"--root={DATA_ROOT / ds}", f"--name={ds}",
             f"--flavor={flavor}", "--", *pargs, f"--steps={steps}", f"--batch_size={batch}",
-            "--num_workers=4", "--save_freq=10000"]
+            "--num_workers=4", "--save_freq=10000", "--log_freq=50"]
     if safe_name(name):
         argv.append(f"--job_name={name}")          # Hub 모델 repo 이름의 앞부분
     if b.get("amp"):

@@ -370,7 +370,9 @@ pip install "torch<2.12" "torchvision<0.27" --index-url https://download.pytorch
 python -c "import torch; print(torch.__version__, torch.xpu.is_available())"     # 2.11.x+xpu True 이면 성공
 ```
 되돌리기: 같은 명령에서 `whl/xpu` 대신 `whl/cpu`.
-Ubuntu 26.04 + Core Ultra 에서 `2.11.0+xpu True Intel(R) Graphics` 로 잡히는 것까지 확인했습니다 (학습 속도는 아직 실측 전).
+실측 (Ubuntu 26.04 + Core Ultra 내장 GPU `Intel(R) Graphics`, ACT 52M, batch 8): **약 1.17 s/step**
+(`updt_s 1.166`, `data_s 0.009` — 영상 디코딩이 아니라 GPU 계산이 병목). 2000 step 약 39분, 80000 step 약 26시간입니다.
+동작 확인·짧은 학습은 이 기기로, 본 학습(수만 step)은 HF Jobs 나 NVIDIA 기기를 권합니다.
 
 XPU 경로 알아 둘 것
 - 설치 스크립트가 XPU 휠을 못 받으면 CPU 휠로 내려가 계속 설치하고 로그에 경고를 남깁니다. 끝에 `torch 휠: xpu` 로 나와야 합니다.
