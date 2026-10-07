@@ -1321,14 +1321,25 @@ def delete_job(jid):
     return True
 
 
-def log_tail(jid, nbytes=4000):
+def collapse_cr(text):
+    """진행 막대(tqdm 등)는 줄바꿈 없이 \r 로 같은 줄을 덮어씁니다 — 터미널처럼 줄마다 마지막 내용만 남깁니다."""
+    out = []
+    for line in text.split("\n"):
+        if "\r" in line:
+            parts = [x for x in line.split("\r") if x.strip()]
+            line = parts[-1] if parts else ""
+        out.append(line)
+    return "\n".join(out)
+
+
+def log_tail(jid, nbytes=65536):
     if not safe_name(jid):
         return ""
     j = load_json(JOB_DIR / f"{jid}.json", {})
     try:
         with open(j["log"], "rb") as f:
             f.seek(max(-nbytes, -os.path.getsize(j["log"])), 2)
-            return f.read().decode(errors="ignore")[-3200:]
+            return collapse_cr(f.read().decode(errors="ignore"))[-3200:]
     except Exception:
         return ""
 
@@ -4182,12 +4193,21 @@ def api_trainlog():
     target = _clamp_int(args.get("--steps"), 0, 0, 10 ** 9)
     batch = _clamp_int(args.get("--batch_size"), 0, 0, 10 ** 6)
     prog = None
-    if target and pts:
+    tail = log_tail(j["id"])
+    # lerobot 은 step 로그를 200 step 마다 남깁니다. 그 사이에는 진행 막대(12/2000 [..<2:08:55, ..])로 진행률·남은 시간을 봅니다
+    bar = None
+    for bm in re.finditer(r"(\d+)/(\d+) \[[^\]<]*<(?:(\d+):)?(\d+):(\d+)", tail):
+        bar = bm
+    if bar and status == "running" and (not pts or int(bar.group(1)) > pts[-1][0]):
+        step, tot = int(bar.group(1)), int(bar.group(2))
+        h, mi, se = int(bar.group(3) or 0), int(bar.group(4)), int(bar.group(5))
+        prog = {"step": step, "target": tot, "pct": round(100 * step / tot, 1) if tot else 0, "eta_s": h * 3600 + mi * 60 + se}
+    elif target and pts:
         prog = {"step": pts[-1][0], "target": target, "pct": round(100 * pts[-1][0] / target, 1)}
         if sps and batch and status == "running":
             prog["eta_s"] = int(max(0, target - pts[-1][0]) / (sps / batch))
     return JSONResponse({"points": pts[-2000:], "extra": extra[-2000:], "progress": prog,
-                         "tail": log_tail(j["id"]), "current": f'{j["id"]} [{status}]'})
+                         "tail": tail, "current": f'{j["id"]} [{status}]'})
 
 
 # ----------------------------- 모델 (Models 탭) · 내보내기/가져오기 · 이어서 학습 ---------
