@@ -58,6 +58,7 @@ Intel 쪽은 아래
 ```bash
 cd ~/project/arm-lab && git pull
 source activate.sh
+pip install "websockets>=12"     # Control 탭 WebSocket (예전 설치 스크립트에서 빠져 있던 것)
 # OMX 를 처음 쓸 때 한 번만
 pip install "dynamixel-sdk>=3.7.31,<3.9.0"
 pip install --no-deps -e plugins/lerobot_robot_bi_omx -e plugins/lerobot_teleoperator_bi_omx
@@ -403,6 +404,7 @@ python tools_dxlcheck.py --port /dev/serial/by-id/usb-... --role follower   # OM
 |---|---|
 | 포트가 안 보임 | USB 다시 꽂기, 사용자가 `dialout` 그룹인지 (`sudo usermod -aG dialout $USER` 후 재로그인) |
 | "캘리브레이션 파일이 없습니다" | 셋업 마법사 ③ 또는 Calib 탭 (기종마다 파일 폴더가 따로입니다) |
+| Control 탭이 "연결 중" 에서 안 넘어감, 로그에 `No supported WebSocket library` · `/ws/control 404` | `pip install "websockets>=12"` 후 arm-lab 재시작 (예전 설치 스크립트 누락) |
 | 3D 가 안 나옴 | three.js 를 인터넷(CDN)에서 받습니다. 인터넷이 없으면 3D 칸만 빠지고 나머지는 동작 |
 | 데이터셋에 "모드 불일치" | 그 데이터셋을 찍은 기종·한팔/양팔과 지금 설정이 다름 — 이어받기·추론 불가 (학습은 가능) |
 | "다른 작업 실행 중" | Control 탭이 열려 있거나 수집·감시·캘리브레이션이 도는 중 — Jobs 탭이나 해당 화면에서 끝내기 |

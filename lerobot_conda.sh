@@ -245,7 +245,8 @@ pip uninstall -y torchcodec || true
 pip install "av>=15.0.0,<16.0.0"
 
 log "4-2. arm-lab 의존성"
-pip install "fastapi<1.0" uvicorn
+# websockets: Control 탭(/ws/control)이 WebSocket 을 씁니다. uvicorn 만 깔면 WebSocket 이 404 로 거부됩니다
+pip install "fastapi<1.0" uvicorn "websockets>=12"
 
 log "4-3. 양팔 OMX 플러그인 (bi_omx_follower / bi_omx_leader)"
 # lerobot 에 양팔 OMX 가 없어서 이 레포의 plugins/ 를 설치합니다. 설치된 패키지 이름이
@@ -308,7 +309,7 @@ from lerobot.motors.dynamixel import DynamixelMotorsBus
 import dynamixel_sdk  # noqa: F401
 import lerobot_robot_bi_omx, lerobot_teleoperator_bi_omx  # noqa: F401
 from lerobot.scripts.lerobot_record import record_loop
-import fastapi, uvicorn, cv2, av
+import fastapi, uvicorn, cv2, av, websockets  # noqa: F401  websockets 없으면 Control 탭이 안 됩니다
 print("lerobot :", "OK (so_follower / bi_so_follower / feetech / omx / bi_omx / dynamixel / record_loop)")
 print("fastapi :", fastapi.__version__, "| cv2:", cv2.__version__, "| av:", av.__version__)
 PY

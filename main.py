@@ -9649,4 +9649,9 @@ if __name__ == "__main__":
         print(f"open : http://<host>:{PORT}/?token={AUTH_TOKEN}   (token: {TOKEN_FILE})")
     else:
         print(f"open : http://<host>:{PORT}/   (인증 없음 — 켜려면 ARMLAB_AUTH=on)")
+    import importlib.util
+    if not any(importlib.util.find_spec(m) for m in ("websockets", "wsproto")):
+        # uvicorn 은 WebSocket 라이브러리가 없으면 경고만 하고 /ws/* 를 404 로 거부합니다 → Control 탭이 연결되지 않음
+        print("!! WebSocket 라이브러리가 없습니다 — Control 탭이 동작하지 않습니다. "
+              "arm-lab 환경에서: pip install \"websockets>=12\" 후 다시 실행하세요")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
